@@ -1,2 +1,2 @@
-# election-census-machinelearning
-Machine learning analysis of U.S. county-level election and census data using R.
+# U.S. Election & Census Machine Learning Analysis
+## Project Overview
