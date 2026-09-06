@@ -1,0 +1,629 @@
+---
+title: "PSTAT 131 Final Project"
+output: html_document
+date: "2026-05-27"
+---
+
+# Set up
+
+```{r}
+library(tidyverse)
+library(readr)
+library(dplyr)
+library(usmap)
+library(ggplot2)
+library(tree)
+library(maptree)
+library(glmnet)
+library(ROCR)
+library(randomForest)
+library(gbm)
+```
+
+```{r}
+## read election data 
+election_raw <- read_csv("~/Downloads/election_raw.csv", col_names = TRUE) 
+## read census data
+census <- read_csv("~/Downloads/census.csv") 
+```
+
+# Election data
+
+### Question 1
+
+```{r}
+dim(election_raw)
+any(is.na(election_raw))
+length(unique(election_raw$State))
+```
+
+The dimension of election_raw is 3160x5, meaning the dataset contains 3160 observations and 5 variables. There are no missing values in the dataset since it returned FALSE. In addition, there are 51 distinct values in the State variable, showing that the dataset includes all 50 states and one federal district (Washington DC)
+
+# Census Data
+
+### Question 2
+
+```{r}
+dim(census)
+any(is.na(census))
+length(unique(census$County))
+length(unique(election_raw$County))
+```
+
+The dimension of census is 3222x14, meaning the dataset contains 3222 observations and 14 variables. There are no missing values in the dataset since it returned FALSE. The County variable in census contains 1960 distinct values, while the County variable in election_raw contains 1898 distinct values.
+
+The number of distinct countries is smaller than the total number of observations because many countries share the same name across different states. Also, the census dataset contains more distinct county names than election_raw, showing that the census dataset may include additional counties that are not represent in the election dataset.
+
+# Data wrangling
+
+### Question 3
+
+```{r}
+election_state <- election_raw %>%
+  group_by(State) %>%
+  summarise(
+    votes_gop = sum(votes_gop), 
+    votes_dem = sum(votes_dem)
+  )
+head(election_state)
+```
+
+### Question 4
+
+```{r}
+county_winner <- election_raw %>%
+  mutate(
+    winner = ifelse(votes_gop > votes_dem, 
+                    "Republican", 
+                    "Democrat")
+  )
+head(county_winner)
+```
+
+```{r}
+state_winner <- election_state %>%
+  mutate(
+    winner = ifelse(votes_gop > votes_dem, 
+                    "Republican", 
+                    "Democrat")
+  )
+head(state_winner)
+```
+
+# Visualization
+
+### Question 5
+
+```{r}
+counties <- us_map(regions = 'counties')
+
+ggplot(counties) + 
+  geom_sf(aes(fill = county), color = 'white')+ 
+  coord_sf() + 
+  guides(fill = 'none')
+```
+
+### Question 6
+
+```{r}
+states <- us_map()
+states$full <- tolower(states$full)
+state_winner$full <- tolower(state_winner$State)
+states_map <- left_join(states, state_winner, by = 'full')
+ggplot(states_map) + 
+  geom_sf(aes(fill = winner), color = 'white') + 
+  coord_sf()
+
+
+
+```
+
+### Question 7
+
+```{r}
+counties <- us_map(regions = 'counties')
+ca_counties <- counties[counties$abbr == 'CA', ]
+ca_winner <- county_winner[county_winner$State == 'California', ]
+ca_winner$county <- tolower(ca_winner$County)
+ca_counties$county <- tolower(ca_winner$county)
+ca_map <- left_join(ca_counties, ca_winner, by = 'county')
+ggplot(ca_map) + 
+  geom_sf(aes(fill = winner), color = 'white') + 
+  coord_sf()
+```
+
+### Question 8
+
+```{r}
+census$`Median Household Income`[
+    census$`Median Household Income` < 0
+] <- NA
+
+census_vote <- left_join(census, county_winner,
+                         by = c("County", "State"))
+
+census_vote <- census_vote %>%
+    filter(!is.na(winner))
+
+ggplot(census_vote,
+       aes(x = winner,
+           y = `Median Household Income`,
+           fill = winner)) +
+    geom_boxplot() +
+    scale_fill_manual(values = c("Democrat" = "blue",
+                                 "Republican" = "red")) +
+    labs(
+        title = "Median Household Income by County Election Winner",
+        x = "Winning Party",
+        y = "Median Household Income"
+    )
+```
+
+For my open-ended visualization, I combined the census dataset with the county_winner dataset to compare the median household income between Democratic-winning and Republican-winning counties. I created a boxplot to visualize the income distributions for both groups.
+
+The graph shows that Democratic-winning counties generally have higher median household incomes and greater variability compared with Republican-winning counties. This shows that economic and demographic differences may be related to voting behavior and choice.
+
+### Question 9
+
+```{r}
+census_clean <- census %>%
+    filter(complete.cases(.)) %>%
+    mutate(
+        Male_Pct = `Male Population` / `Total Population`,
+        Female_Pct = `Female Population` / `Total Population`,
+        White_Pct = `White Alone` / `Total Race Responses`,
+        Black_Pct = `Black or African American Alone` / `Total Race Responses`,
+        Hispanic_Pct = `Hispanic or Latino` / `Total Race Responses`,
+        Urban = ifelse(`Urban-Rural` == "Urban", 1, 0)
+    ) %>%
+    
+    select(
+        County,
+        State,
+        `Median Household Income`,
+        Male_Pct,
+        Female_Pct,
+        White_Pct,
+        Black_Pct,
+        Hispanic_Pct,
+        Urban
+    )
+# First 5 rows
+head(census_clean, 5)
+```
+
+# Dimensionality reduction
+
+### Question 10
+
+```{r}
+pca_data <- census_clean %>%
+  select(-County, -State)
+
+pca_out <- prcomp(pca_data, 
+                  center = TRUE, 
+                  scale = TRUE)
+
+# Draw the biplot
+biplot(pca_out, scale = 0, cex = 0.6)
+
+# Two principle components into dataframe
+pc_county <- data.frame(
+  PC1 = pca_out$x[,1], 
+  PC2 = pca_out$x[,2]
+)
+
+head(pc_county)
+```
+
+\
+I centered and scaled the variables before running PCA because the variables are measured on very different scales. Without scaling, variables like Median_Household_Income would dominate the analysis. Scaling allows all variables to contribute fairly.
+
+Variables with opposite signs on the same principal component indicate negative correlation. For example, Male_Pct and Female_Pct point in opposite directions because counties with higher male percentages will have lower female percentages.
+
+To handle qualitative variables, I converted the Urban-Rural variable into binary numeric variable where 1 = Urban and 0 = Rural before running PCA.
+
+```{r}
+sort(abs(pca_out$rotation[,1]), decreasing = TRUE)
+```
+
+The three features with the largest absolute values in the first principal component are: 1. Male_Pct, 2. Female_Pct, 3. White_Pct. These variables contribute the most to the variation explained by PC1.
+
+### Question 11
+
+```{r}
+pca_var <- pca_out$sdev^2
+pve <- pca_var / sum(pca_var)
+cum_pve <- cumsum(pve)
+
+which(cum_pve >= 0.90)[1]
+
+plot(pve, 
+     xlab = 'Principal Component',
+     ylab = 'Proportion of Variance Explained', 
+     ylim = c(0, 1), 
+     type = 'b')
+
+plot(cum_pve, 
+     xlab = 'Principal Component', 
+     ylab = 'Cumulative Proportion of Variance Explained', 
+     ylim = c(0, 1), 
+     type = 'b')
+
+abline(h = 0.90)
+```
+
+The minimum number of principal components needed to capture 90% of the variance is 4.
+
+# Clustering
+
+### Question 12
+
+```{r}
+cluster_data <- census_clean %>%
+  select(-County, -State)
+county_dist <- dist(cluster_data)
+county_hclust <- hclust(county_dist, method = 'complete')
+plot(county_hclust)
+cluster_cut <- cutree(county_hclust, 10)
+table(cluster_cut)
+census_clean$cluster <- cluster_cut
+census_clean[census_clean$County == 'Santa Barbara County', ]
+```
+
+Using PCA Components
+
+```{r}
+pc_dist <- dist(pc_county[, c("PC1", "PC2")])
+
+pc_hclust <- hclust(pc_dist,
+                    method = "complete")
+
+plot(pc_hclust)
+
+pc_cluster_cut <- cutree(pc_hclust, 10)
+
+pc_county$cluster <- pc_cluster_cut
+
+pc_county[census_clean$County == "Santa Barbara County", ]
+```
+
+The clustering results using the original variables and the PCA-based variables were similar overall, but the PCA clustering produced cleaner and more balanced groups. Using only PC1 and PC2 reduced noise and summarized most of the important variation in the data, which made the clusters easier to interpret.
+
+In the clustering using the original features, Santa Barbara County was grouped with counties that had similar demographic and income. In the PCA clustering, Santa Barbara County was also placed into a cluster with counties having similar principal components.
+
+The PCA based clustering seemed more appropriate because PCA reduces dimensionality and removes some redundancy caused by highly correlated variables and focuses on the main patterns in the data.
+
+# Classification
+
+```{r}
+# we move all state and county names into lower-case
+# we further remove suffixes of "county"
+tmpwinner <- county_winner %>% ungroup %>%
+  mutate_at(vars(State, County), tolower) %>%
+  mutate(County = gsub(" county", "", County)) 
+
+# we move all state and county names into lower-case
+# we further remove suffixes of "county"
+tmpcensus <- census_clean %>% mutate_at(vars(State, County), tolower) %>%
+  mutate(County = gsub(" county", "", County)) 
+
+# we join the two datasets
+election_cl <- tmpwinner %>%
+  left_join(tmpcensus, by = c("State" = "State", "County" = "County")) %>% 
+  na.omit
+
+## save meta information
+election_meta <- election_cl %>% select(c(State, FIPS, County, votes_gop, votes_dem))
+
+## save predictors and class labels
+election_cl = election_cl %>% select(-c(State, FIPS, County, votes_gop, votes_dem))
+```
+
+```{r}
+set.seed(10) 
+n <- nrow(election_cl)
+idx.tr <- sample.int(n, 0.8*n) 
+election.tr <- election_cl[idx.tr, ]
+election.te <- election_cl[-idx.tr, ]
+```
+
+```{r}
+set.seed(20) 
+nfold <- 10
+folds <- sample(cut(1:nrow(election.tr), breaks=nfold, labels=FALSE))
+```
+
+```{r}
+calc_error_rate = function(predicted.value, true.value){
+  return(mean(true.value!=predicted.value))
+}
+records = matrix(NA, nrow=3, ncol=2)
+colnames(records) = c("train.error","test.error")
+rownames(records) = c("tree","logistic","lasso")
+```
+
+### Question 13
+
+```{r}
+election.tr.tree <- as.data.frame(election.tr)
+election.te.tree <- as.data.frame(election.te)
+
+colnames(election.tr.tree) <- make.names(colnames(election.tr.tree))
+colnames(election.te.tree) <- make.names(colnames(election.te.tree))
+
+election.tr.tree$winner <- as.factor(election.tr.tree$winner)
+election.te.tree$winner <- as.factor(election.te.tree$winner)
+
+tree_fit <- tree(winner ~ ., data = election.tr.tree)
+
+cv_tree <- cv.tree(tree_fit,
+                   rand = folds,
+                   FUN = prune.misclass,
+                   K = nfold)
+
+best_size <- cv_tree$size[which.min(cv_tree$dev)]
+
+pruned_tree <- prune.misclass(tree_fit,
+                              best = best_size)
+
+plot(tree_fit)
+text(tree_fit, pretty = 0, cex = 0.6)
+
+plot(pruned_tree)
+text(pruned_tree, pretty = 0, cex = 0.6)
+
+train_pred <- predict(pruned_tree,
+                      election.tr.tree,
+                      type = 'class')
+
+test_pred <- predict(pruned_tree,
+                     election.te.tree,
+                     type = 'class')
+
+records['tree', 'train.error'] <- calc_error_rate(train_pred,
+                                                  election.tr.tree$winner)
+
+records["tree", "test.error"] <- calc_error_rate(test_pred,
+                                                 election.te.tree$winner)
+
+records
+```
+
+```{r}
+colnames(election.tr)
+```
+
+The decision tree shows that demographic and socioeconomic variables are important predictors of county voting outcomes. White_Pct was the most important split, suggesting racial composition strongly relates to voting behavior. Counties with lower White_Pct and higher Black_Pct were more likely to vote Democrat, while counties with higher White_Pct were more likely to vote Republican.
+
+Urban status and Median Household Income also influenced voting patterns. Urban counties tended to vote Democrat, while rural counties were more likely to vote Republican. The pruned tree simplified the model while maintaining good prediction accuracy.
+
+### Question 14
+
+```{r}
+table(election.tr$winner)
+class(election.tr$winner)
+election.tr$winner <- as.factor(election.tr$winner)
+election.te$winner <- as.factor(election.te$winner)
+log_fit <- glm(winner ~ ., 
+               data = election.tr, 
+               family = binomial)
+summary(log_fit)
+train_prob <- predict(log_fit,
+                      type = 'response')
+train_pred <- ifelse(train_prob > 0.5, 
+                     'Republican', 
+                     'Democrat')
+test_prob <- predict(log_fit, 
+                     newdata = election.te, 
+                     type = 'response')
+test_pred <- ifelse(test_prob > 0.5, 
+                    'Republican', 
+                    'Democrat')
+records['logistic', 'train.error'] <- 
+  calc_error_rate(train_pred, 
+                  election.tr$winner)
+records['logistic', 'test.error'] <- 
+  calc_error_rate(test_pred, election.te$winner)
+records
+```
+
+Significant variables in the logistic regression model include Median Household Income, Male_Pct, White_Pct, Hispanic_Pct, and Urban. These results are consistent with the decision tree analysis.
+
+Higher White_Pct and Male_Pct increased the probability of Republican voting, while Urban counties were more likely to vote Democrat. The logistic regression model also had a lower test error than the decision tree.
+
+### Question 15
+
+```{r}
+x.train <- model.matrix(winner ~ ., election.tr)[, -1]
+y.train <- election.tr$winner
+
+x.test <- model.matrix(winner ~ ., election.te)[, -1]
+y.test <- election.te$winner
+
+cv.lasso <- cv.glmnet(
+  x.train, 
+  y.train, 
+  family = 'binomial',
+  alpha = 1, 
+  lambda = seq(1, 50) * 1e-4, 
+  nfolds = 10
+)
+
+# Run LASSO logistic regression
+bestlam <- cv.lasso$lambda.min
+bestlam
+
+coef(cv.lasso, s = bestlam)
+
+train.prob <- predict(cv.lasso, 
+                      s = bestlam, 
+                      newx = x.train, 
+                      type = 'response')
+train.pred <- ifelse(train.prob > 0.5, 
+                     'Republican', 
+                     'Democrat')
+test.prob <- predict(cv.lasso, 
+                     s = bestlam, 
+                     newx = x.test, 
+                     type = 'response')
+test.pred <- ifelse(test.prob > 0.5, 
+                    'Republican', 
+                    'Democrat')
+
+records['lasso', 'train.error'] <- 
+  calc_error_rate(train.pred, 
+                  y.train)
+
+records['lasso', 'test.error'] <- 
+  calc_error_rate(test.pred, 
+                  y.test)
+records
+```
+
+The optimal lambda selected by cross validation was 0.0014. The non-zero coefficients included Median Household Income, Male_Pct, White_Pct, Black_Pct, Hispanic_Pct, and Urban, while cluster removed by LASSO.
+
+Compared with ordinary logistic regression, LASSO produced a simpler model with similar predictive performance. The logistic and LASSO models had similar test errors, both slightly lower than the decision tree model.
+
+### Question 16
+
+```{r}
+tree_prob <- predict(pruned_tree, 
+                     newdata = election.te.tree, 
+                     type = "vector")[, 2]
+
+log_prob <- predict(log_fit, 
+                    newdata = election.te, 
+                    type = "response")
+
+lasso_prob <- predict(cv.lasso,
+                      s = bestlam, 
+                      newx = x.test, 
+                      type = "response")
+
+true_value <- ifelse(election.te$winner == "Republican", 1, 0)
+
+pred_tree <- prediction(tree_prob, true_value)
+pred_log <- prediction(log_prob, true_value)
+pred_lasso <- prediction(lasso_prob, true_value)
+
+perf_tree <- performance(pred_tree, "tpr", "fpr")
+perf_log <- performance(pred_log, "tpr", "fpr")
+perf_lasso <- performance(pred_lasso, "tpr", "fpr")
+
+plot(perf_tree, 
+     col = "red", 
+     main = "ROC Curves")
+
+plot(perf_log, 
+     col = "blue", 
+     add = TRUE)
+
+plot(perf_lasso, 
+     col = "green", 
+     add = TRUE)
+
+legend("bottomright", 
+       legend = c("Tree", "Logistic", "LASSO"), 
+       col = c("red", "blue", "green"), 
+       lwd = 2)
+
+```
+
+The ROC curves show that logistic regression and LASSO performed slightly better than the decision tree model. Their curves are generally above the tree curve, showing better classification performance.
+
+The decision tree is easier to interpret and useful for explaining voting behavior, while logistic regression and LASSO are better for prediction accuracy. LASSO also helps reduce overfitting by shrinking less important coefficients.
+
+# Taking it further
+
+```{r}
+election.tr.rf <- election.tr
+election.te.rf <- election.te
+
+colnames(election.tr.rf) <- make.names(colnames(election.tr.rf))
+colnames(election.te.rf) <- make.names(colnames(election.te.rf))
+# Random Forest
+rf_fit <- randomForest(winner ~ ., 
+                      data = election.tr.rf)
+rf_pred <- predict(rf_fit, newdata = election.te.rf)
+rf_error <- mean(rf_pred != election.te$winner)
+
+# Boosting
+boost_fit <- gbm(
+  ifelse(winner == 'Republican', 1, 0) ~ ., 
+  data = election.tr.rf, 
+  distribution = 'bernoulli', 
+  n.trees = 500, 
+  interaction.depth = 2
+)
+
+boost_prob <- predict(boost_fit, newdata = election.te.rf, 
+                      n.trees = 500, 
+                      type = 'response')
+
+boost_pred <- ifelse(boost_prob > 0.5, 
+                     'Republican', 
+                     'Democrat')
+
+boost_error <- mean(boost_pred != election.te.rf$winner)
+
+rf_error
+boost_error
+```
+
+Random Forest and Boosting produced prediction errors similar to logistic regression and LASSO, while outperforming the single decision tree model. Boosting achieved the lowest test error among all method.
+
+Ensemble methods such as Random Forest and Boosting improve prediction accuracy by combining multiple trees, but they are harder to interpret. Logistic regression and decision trees are easier to explain, while ensemble methods are more useful when prediction performance is the main goal.
+
+### Question 18
+
+```{r}
+pca_cl <- election_cl %>%
+  select(-winner)
+
+pca_cl_out <- prcomp(pca_cl,
+                     center = TRUE,
+                     scale = TRUE)
+
+pc_cl <- data.frame(
+  PC1 = pca_cl_out$x[,1],
+  PC2 = pca_cl_out$x[,2],
+  winner = election_cl$winner
+)
+
+pc_train <- pc_cl[idx.tr, ]
+pc_test <- pc_cl[-idx.tr, ]
+
+pc_train$winner <- election.tr$winner
+pc_test$winner <- election.te$winner
+
+pc_log_fit <- glm(winner~PC1 + PC2, 
+                  data = pc_train, 
+                  family = binomial)
+
+summary(pc_log_fit)
+
+pc_prob <- predict(pc_log_fit,
+                   newdata = pc_test,
+                   type = "response")
+
+pc_pred <- ifelse(pc_prob > 0.5,
+                  levels(pc_test$winner)[2],
+                  levels(pc_test$winner)[1])
+
+pc_error <- mean(pc_pred != pc_test$winner)
+
+pc_error
+
+
+```
+
+I applied PCA using only the first two principal components to reduce the dimensionality of the data while keeping most of the variation in the predictors. PCA helps simplify the model and reduce multicollinearity. However, the PCA based logistic regression had higher test error suggests that using only two principal components lost some important information needed for accurate classification. PC1 was significant in the model while PC2 is not, showing that the most predictive information was captured by the first principal components.
+
+### Question 19
+
+Overall, the analysis showed that census and demographic variables are strongly related to voting behavior across counties. Variables like White_Pct, Median Household Income, Urban status, and Hispanic_Pct were important in several models. Urban counties and counties with lower white population percentages were more likely to vote Democrat, while rural and white counties were more likely to vote Republican.
+
+Logistic regression and LASSO had the lowest test errors, showing that the relationship between the variables and voting outcomes are linear. The decision tree was easier to understand and show clear voting patterns, but it may oversimplify some relationships. The PCA model performed worse because reducing the data to only two principal components removed useful info.
+
+One limitation is that models only used census data. Voting behavior is also affected by other factors such as education, religion, and many other factors. Adding more detailed data could definitely improve the models. Overall, the results show that demographic differences between counties are highly connected to election outcome.
